@@ -1,0 +1,229 @@
+// Esp32 cam + limit switch 
+
+/*********
+  ESP32-CAM Main Node
+  - Video Snapshot
+  - Limit Switch Status
+  - Gets pH from another ESP via WiFi (HTTP)
+*********/
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "esp_http_server.h"
+
+// ====== CAMERA PINS ======
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+#define LIMIT_SWITCH_PIN  12
+
+// ====== WiFi ======
+const char* ssid = "MyHouse"; //change ssid
+const char* password = "01DDT23F1"; // change password
+const char* sensorNodeIP = "192.168.0.29";  // <-- change to your sensor node IP
+
+String latestPH = "N/A";
+
+// ====== HTTP SERVER ======
+static esp_err_t index_handler(httpd_req_t *req);
+static esp_err_t snapshot_handler(httpd_req_t *req);
+static esp_err_t status_handler(httpd_req_t *req);
+static esp_err_t ph_handler(httpd_req_t *req);
+httpd_handle_t startCameraServer();
+
+// ====== HTML PAGE ====== 
+// edit the html page to your liking
+static const char PROGMEM INDEX_HTML[] = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>Cage 1</title>
+<style>
+body { background:#111; color:#eee; font-family:Arial; text-align:center; }
+h1 { color:#03a9f4; }
+#camera { width:90%%; max-width:640px; border:2px solid #03a9f4; border-radius:12px; }
+#switch, #ph { font-size:1.2em; margin-top:10px; }
+</style>
+</head>
+<body>
+<h1>Cage 1 status </h1>
+<img id="camera" src="/snapshot">
+<div id="switch">Limit Switch: Loading...</div>
+<div id="ph">pH: Loading...</div>
+
+<script>
+async function update() {
+  try {
+    const s = await fetch('/status'); 
+    const st = await s.text();
+    document.getElementById('switch').textContent = "Limit Switch: " + st;
+    document.getElementById('switch').style.color = (st === "PRESSED") ? "#ff5252" : "#00e676";
+  } catch(e){}
+
+  try {
+    const p = await fetch('/ph');
+    const pt = await p.text();
+    document.getElementById('ph').textContent = "pH: " + pt;
+  } catch(e){}
+
+  document.getElementById('camera').src = "/snapshot?rand=" + Math.random();
+
+  // Update the image faster (every 500ms), but sensor data every 2s
+  setTimeout(update, 200);
+}
+update();
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ====== HANDLERS ======
+static esp_err_t index_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, (const char*)INDEX_HTML, strlen(INDEX_HTML));
+}
+
+static esp_err_t snapshot_handler(httpd_req_t *req) {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) return httpd_resp_send_500(req);
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  esp_err_t res = httpd_resp_send(req, (const char*)fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+  return res;
+}
+
+static esp_err_t status_handler(httpd_req_t *req) {
+  int state = digitalRead(LIMIT_SWITCH_PIN);
+  const char* msg = (state == LOW) ? "PRESSED" : "RELEASED";
+  httpd_resp_set_type(req, "text/plain");
+  return httpd_resp_send(req, msg, strlen(msg));
+}
+
+static esp_err_t ph_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/plain");
+  return httpd_resp_send(req, latestPH.c_str(), latestPH.length());
+}
+
+// ====== SERVER START ======
+httpd_handle_t startCameraServer() {
+  httpd_handle_t server = NULL;
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+  httpd_uri_t index_uri = { .uri="/", .method=HTTP_GET, .handler=index_handler };
+  httpd_uri_t snapshot_uri = { .uri="/snapshot", .method=HTTP_GET, .handler=snapshot_handler };
+  httpd_uri_t status_uri = { .uri="/status", .method=HTTP_GET, .handler=status_handler };
+  httpd_uri_t ph_uri = { .uri="/ph", .method=HTTP_GET, .handler=ph_handler };
+
+  if (httpd_start(&server, &config) == ESP_OK) {
+    httpd_register_uri_handler(server, &index_uri);
+    httpd_register_uri_handler(server, &snapshot_uri);
+    httpd_register_uri_handler(server, &status_uri);
+    httpd_register_uri_handler(server, &ph_uri);
+  }
+  return server;
+}
+
+// ====== SETUP ======
+void setup() {
+  Serial.begin(115200);
+  pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected!");
+  Serial.print("CAM IP: ");
+  Serial.println(WiFi.localIP());
+
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 10;
+  config.fb_count = 2;
+
+  if (esp_camera_init(&config) != ESP_OK) {
+    Serial.println("Camera init failed!");
+    return;
+    sensor_t *s = esp_camera_sensor_get();
+  }
+
+sensor_t *s = esp_camera_sensor_get();
+
+// Brightness and contrast tuning
+s->set_brightness(s, 2);     // -2 to 2
+s->set_contrast(s, 0);       // -2 to 2
+s->set_saturation(s, 0);     // -2 to 2
+
+// White balance setup
+s->set_whitebal(s, 1);       // enable white balance
+s->set_awb_gain(s, 1);       // enable AWB gain
+s->set_wb_mode(s, 1);        // 1 = Daylight (Sunny)
+
+// Optional: exposure/gain control
+s->set_exposure_ctrl(s, 1);
+s->set_gain_ctrl(s, 1);
+
+  startCameraServer();
+  Serial.println("Server ready");
+}
+
+// ====== LOOP ======
+void loop() {
+  static unsigned long lastFetch = 0;
+  if (millis() - lastFetch > 3000) {
+    lastFetch = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      HTTPClient http;
+      String url = "http://" + String(sensorNodeIP) + "/ph";
+      http.begin(url);
+      int code = http.GET();
+      if (code == 200) {
+        String payload = http.getString();
+        int start = payload.indexOf(":") + 1;
+        int end = payload.indexOf("}");
+        latestPH = payload.substring(start, end);
+        latestPH.trim();
+        Serial.println("Updated pH: " + latestPH);
+      }
+      http.end();
+    }
+  }
+  delay(100);
+}
