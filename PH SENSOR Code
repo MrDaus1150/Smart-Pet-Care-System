@@ -1,0 +1,49 @@
+// esp32 c3 ph sensor code
+
+/*********
+  ESP32 pH Sensor Node
+  WiFi Web Server providing pH data at /ph
+*********/
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "MyHouse"; // change ssid
+const char* password = "01DDT23F1"; //change password
+
+#define PH_SENSOR_PIN 0  // Change to your ADC pin
+
+WebServer server(80);
+
+float readPH() {
+  int raw = analogRead(PH_SENSOR_PIN);
+  float voltage = raw * (3.3 / 4095.0);
+  float phValue = 7 + ((1.78 - voltage) * 3.0);
+  return phValue;
+}
+
+void handlePH() {
+  float ph = readPH();
+  String json = String("{\"ph\":") + String(ph, 2) + "}";
+  server.send(200, "application/json", json);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected!");
+  Serial.print("Sensor Node IP: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/ph", handlePH);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+}
