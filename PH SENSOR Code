@@ -10,7 +10,7 @@
 const char* ssid = "MyHouse"; // change ssid
 const char* password = "01DDT23F1"; //change password
 
-#define PH_SENSOR_PIN 0  // Change to your ADC pin
+#define PH_SENSOR_PIN 1  // Change to your ADC pin
 
 WebServer server(80);
 
