@@ -1,0 +1,95 @@
+/*********
+  ESP32-C3 pH Sensor + Limit Switch + Firebase
+*********/
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h> // NEW include
+
+// Add helper for token status
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+
+// ----- WiFi Credentials -----
+const char* ssid = "MyHouse";
+const char* password = "01DDT23F1";
+
+// ----- Firebase Credentials -----
+#define API_KEY "your_web_api_key_here"  // from Firebase project settings
+#define DATABASE_URL "https://your-project-id-default-rtdb.firebaseio.com/" // your DB URL
+
+// Define Firebase objects
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// ----- Hardware Pins -----
+#define PH_SENSOR_PIN 1
+#define LIMIT_SWITCH_PIN 5
+
+// ----- Read pH -----
+float readPH() {
+  int raw = analogRead(PH_SENSOR_PIN);
+  float voltage = raw * (3.3 / 4095.0);
+  float phValue = 7 + ((1.78 - voltage) * 3.0);
+  return phValue;
+}
+
+// ----- Gate status -----
+String getGateStatus() {
+  int state = digitalRead(LIMIT_SWITCH_PIN);
+  if (state == LOW)
+    return "Cage Closed";
+  else
+    return "Gate Open";
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected!");
+  Serial.println(WiFi.localIP());
+
+  // Firebase configuration
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  // Anonymous sign-in (no email/password)
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase sign-in OK");
+  } else {
+    Serial.printf("Sign-up error: %s\n", config.signer.signupError.message.c_str());
+  }
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void loop() {
+  float ph = readPH();
+  String gateStatus = getGateStatus();
+
+  // Create JSON payload
+  FirebaseJson json;
+  json.set("ph", ph);
+  json.set("status", gateStatus);
+
+  Serial.println("Uploading to Firebase...");
+
+  if (Firebase.RTDB.setJSON(&fbdo, "/sensorData", &json)) {
+    Serial.println("Upload success!");
+  } else {
+    Serial.println("Upload failed: " + fbdo.errorReason());
+  }
+
+  Serial.printf("pH: %.2f\n", ph);
+  Serial.println("Gate: " + gateStatus);
+  Serial.println("------------------");
+
+  delay(1000);
+}
